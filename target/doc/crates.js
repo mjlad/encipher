@@ -1,2 +1,0 @@
-window.ALL_CRATES = ["base64","block_buffer","cfg_if","chacha20","cpufeatures","crypto_common","digest","encipher","generic_array","getrandom","hmac","libc","proc_macro2","quote","rand","rand_core","sha2","subtle","syn","thiserror","thiserror_impl","typenum","unicode_ident"];
-//{"start":21,"fragment_lengths":[8,15,9,11,14,16,9,11,16,12,7,7,14,8,7,12,7,9,6,12,17,10,16]}
