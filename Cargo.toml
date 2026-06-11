@@ -1,7 +1,13 @@
 [package]
-name    = "encipher"
-version = "0.1.0"
-edition = "2021"
+name        = "encipher"
+version     = "0.1.0"
+edition     = "2021"
+description = "A fast session-data cipher for Rust"
+license     = "Apache-2.0"
+repository  = "https://github.com/mjlad/encipher"
+readme      = "README.md"
+keywords    = ["encryption", "session", "cipher", "hmac", "security"]
+categories  = ["cryptography", "encoding"]
 
 [lib]
 name       = "encipher"
@@ -9,10 +15,10 @@ crate-type = ["rlib"]
 
 [dependencies]
 thiserror = "2"
-hmac   = "0.12"
-sha2   = "0.10"
-base64 = "0.22"
-rand   = { version = "0.10", features = ["chacha"] }
+hmac      = "0.12"
+sha2      = "0.10"
+base64    = "0.22"
+rand      = { version = "0.10", features = ["chacha"] }
 
 [profile.release]
 opt-level     = 3
