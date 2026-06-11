@@ -1,0 +1,20 @@
+[package]
+name    = "encipher"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "encipher"
+crate-type = ["rlib"]
+
+[dependencies]
+thiserror = "2"
+hmac   = "0.12"
+sha2   = "0.10"
+base64 = "0.22"
+rand   = { version = "0.10", features = ["chacha"] }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
