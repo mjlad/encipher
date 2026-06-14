@@ -121,3 +121,68 @@ impl Encipher {
         String::from_utf8(decrypted).map_err(|_| EncipherError::InvalidUtf8)
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;  // يستورد Encipher و EncipherError من lib.rs
+
+    // ─── 1. encrypt → decrypt returns the original text ───
+    #[test]
+    fn test_encrypt_decrypt() {
+        let cipher = Encipher::new(Some(42), None, 7).unwrap();
+        let token  = cipher.encrypt("hello world");
+        let result = cipher.decrypt(&token).unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    // ─── 2. tampered token is rejected ───
+    #[test]
+    fn test_tampered_token() {
+        let cipher   = Encipher::new(Some(42), None, 7).unwrap();
+        let token    = cipher.encrypt("hello");
+        let tampered = format!("{token}X");
+        assert!(cipher.decrypt(&tampered).is_err());
+    }
+
+    // ─── 3. malformed token is rejected ───
+    #[test]
+    fn test_invalid_token() {
+        let cipher = Encipher::new(Some(42), None, 7).unwrap();
+        assert!(cipher.decrypt("garbage").is_err());
+        assert!(cipher.decrypt("a.b").is_err());
+    }
+
+    // ─── 4. missing key returns MissingKey error ───
+    #[test]
+    fn test_missing_key() {
+        let result = Encipher::new(None, None, 7);
+        assert!(matches!(result, Err(EncipherError::MissingKey)));
+    }
+
+    // ─── 5. non-existent env key returns InvalidKey error ───
+    #[test]
+    fn test_invalid_env_key() {
+        let result = Encipher::new(None, Some("KEY_THAT_DOES_NOT_EXIST"), 7);
+        assert!(matches!(result, Err(EncipherError::InvalidKey)));
+    }
+
+    // ─── 6. empty string encrypts and decrypts successfully ───
+    #[test]
+    fn test_empty_string() {
+        let cipher = Encipher::new(Some(42), None, 7).unwrap();
+        let token  = cipher.encrypt("");
+        let result = cipher.decrypt(&token).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ─── 7. long string encrypts and decrypts successfully ───
+    #[test]
+    fn test_long_string() {
+        let cipher = Encipher::new(Some(42), None, 7).unwrap();
+        let input  = "a".repeat(10_000);
+        let token  = cipher.encrypt(&input);
+        let result = cipher.decrypt(&token).unwrap();
+        assert_eq!(result, input);
+    }
+}
