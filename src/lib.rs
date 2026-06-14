@@ -125,7 +125,7 @@ impl Encipher {
 
 #[cfg(test)]
 mod tests {
-    use super::*;  // يستورد Encipher و EncipherError من lib.rs
+    use super::*; // imports Encipher and EncipherError from lib.rs
 
     // ─── 1. encrypt → decrypt returns the original text ───
     #[test]
