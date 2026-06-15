@@ -27,7 +27,7 @@ mod hmac;
 mod lists;
 
 use thiserror::Error;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+use base64ct::{Base64Url, Encoding};
 use rand::RngExt;
 
 use lists::{CipherList, generate_lists};
@@ -93,7 +93,7 @@ impl Encipher {
     pub fn encrypt(&self, text: &str) -> String {
         let start_from  = rand::rng().random_range(0..NUM_LISTS);
         let encrypted   = cipher::encrypt_raw(text.as_bytes(), &self.lists[..], start_from);
-        let cipher_text = URL_SAFE.encode(&encrypted);
+        let cipher_text = Base64Url::encode_string(&encrypted);
         let signature   = hmac::sign(&cipher_text, start_from, self.key);
         format!("{start_from}.{cipher_text}.{signature}")
     }
@@ -114,7 +114,7 @@ impl Encipher {
             return Err(EncipherError::TamperedData);
         }
 
-        let encrypted = URL_SAFE.decode(cipher_text).map_err(|_| EncipherError::InvalidBase64)?;
+        let encrypted = Base64Url::decode_vec(cipher_text).map_err(|_| EncipherError::InvalidBase64)?;
 
         let decrypted = cipher::decrypt_raw(&encrypted, &self.lists[..], start_from);
 

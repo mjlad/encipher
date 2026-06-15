@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64ct::{Base64UrlUnpadded, Encoding};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -23,19 +23,22 @@ pub fn sign(cipher_text: &str, start_from: usize, key: u64) -> String {
         &build_secret(key, start_from))
         .expect("HMAC init failed");
     mac.update(cipher_text.as_bytes());
-    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    Base64UrlUnpadded::encode_string(&mac.finalize().into_bytes())
 }
 
 
 /// Verifies the signature using constant-time comparison to prevent timing attacks.
+/// Uses `base64ct` for constant-time Base64 decoding to prevent side-channel leakage.
 pub fn verify(cipher_text: &str, start_from: usize, key: u64, signature: &str) -> bool {
     let mut mac = HmacSha256::new_from_slice(
         &build_secret(key, start_from))
         .expect("HMAC init failed");
     mac.update(cipher_text.as_bytes());
 
-    let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(signature) else {
-        return false;
+    let mut buf = [0u8; 32];
+    let sig_bytes = match Base64UrlUnpadded::decode(signature, &mut buf) {
+        Ok(bytes) => bytes,
+        Err(_)    => &buf[..],
     };
 
     mac.verify_slice(&sig_bytes).is_ok()
