@@ -1,0 +1,29 @@
+[package]
+name = "encipher-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.encipher]
+path = ".."
+features = ["fuzzing"]
+
+[[bin]]
+name = "decrypt"
+path = "fuzz_targets/decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "context_from_bytes"
+path = "fuzz_targets/context_from_bytes.rs"
+test = false
+doc = false
+bench = false
