@@ -3,7 +3,7 @@
 All notable changes to this crate are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [3.0.0] - Unreleased
+## [3.0.0] - 2026-09-09
 
 ### Security
 
@@ -33,6 +33,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Refresh the main and fuzz lockfiles to `rand` 0.10.2 and `thiserror`
   2.0.20 within the existing dependency requirements.
+- Refresh transitive locks to `chacha20` 0.10.2 and `anyhow` 1.0.104
+  to replace yanked versions and address RUSTSEC-2026-0190.
 - Update README and API documentation for migration, errors, expiry,
   randomness, and buffer reuse.
 

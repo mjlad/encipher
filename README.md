@@ -13,7 +13,7 @@ formatting, token layout, purpose binding, and expiry all handled for
 you, so the only decision left to make is which backend fits your
 deployment target.
 
-> **Version 3.0 (unreleased)** fixes nonce generation across `fork` and
+> **Version 3.0** fixes nonce generation across `fork` and
 > improves buffer reuse. Existing 2.x tokens remain compatible with the
 > same key and backend. See [Upgrading from 2.x](#upgrading-from-2x) and
 > [CHANGELOG.md](CHANGELOG.md) for the API changes and the earlier 0.x migration.
