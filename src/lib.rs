@@ -21,16 +21,17 @@
 //! `Some(42)` above is for the example's sake only — see
 //! [`Encipher::new`] for what a real key needs to be.
 //!
-//! Coming from a 0.x release: this is a from-scratch rewrite around
-//! standard AEAD ciphers, replacing the previous custom design — a
-//! clean break, not an incremental update. See this crate's
-//! `CHANGELOG.md` for what changed and what upgrading means for
-//! existing tokens.
+//! Version 3.0 retains the 2.x token format and key derivation. When
+//! upgrading, replace `Some(0)` with `None` for no expiry and add a
+//! wildcard arm to exhaustive [`EncipherError`] matches. Existing 2.x
+//! tokens, including non-expiring tokens minted with `Some(0)`, remain
+//! readable with the same key and backend. Tokens from the custom 0.x
+//! design remain incompatible; see `CHANGELOG.md` for migration details.
 //!
 //! One thing you won't find here: any notion of "revoke this one token".
-//! A token is already unique on its own — its nonce sees to that — so
-//! it's already a fine key to store in a revocation list of your own
-//! making, the moment a caller logs out. This crate stops at proving a
+//! Store the token string itself in a revocation list when a caller logs
+//! out. Random nonces make collisions unlikely, but do not guarantee
+//! uniqueness. This crate stops at proving a
 //! token is genuine and unexpired; what a wider session-management layer
 //! does with that fact is deliberately none of its business.
 
@@ -41,6 +42,7 @@ pub mod aad;
 mod aes_backend;
 mod xchacha_backend;
 
+use aad::MAX_FIELD_LEN;
 use aes_gcm::Aes256Gcm;
 use base64ct::{Base64Url, Encoding};
 use chacha20poly1305::XChaCha20Poly1305;
@@ -64,7 +66,11 @@ const MAX_TOKEN_LEN: usize = 32 * 1024;
 /// with this one by accident.
 const DEFAULT_PURPOSE: &str = "session";
 
+const TAG_LEN: usize = 16;
+
+/// An operation failure. Matches must include a fallback for future variants.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EncipherError {
     #[error("the key or key_env must be passed")]
     MissingKey,
@@ -78,16 +84,22 @@ pub enum EncipherError {
     TamperedData,
     #[error("token has expired")]
     Expired,
+    #[error("expires_at must be greater than zero — pass None for no expiry")]
+    InvalidExpiry,
     #[error("token was not minted for the expected purpose")]
     WrongPurpose,
     #[error("purpose must not be empty — pass None for the default instead")]
     EmptyPurpose,
+    #[error("purpose exceeds the {MAX_FIELD_LEN}-byte limit")]
+    PurposeTooLong,
     #[error("plaintext exceeds the {MAX_PLAINTEXT_BYTES}-byte limit")]
     TooLarge,
     #[error("decrypted data was not valid UTF-8")]
     InvalidUtf8,
     #[error("base64 is invalid")]
     InvalidBase64,
+    #[error("operating system randomness is unavailable")]
+    RandomnessUnavailable,
 }
 
 /// Selects the internal encryption engine.
@@ -165,23 +177,35 @@ impl Encipher {
         Ok(Encipher { state })
     }
 
-    /// Encrypts a string and returns a signed, self-contained token.
+    /// Encrypts a string and returns an authenticated, self-contained token.
     ///
-    /// `expires_at` is an optional Unix timestamp (seconds) after which
-    /// [`decrypt`](Self::decrypt) will refuse the token — pass `None` for
+    /// `expires_at` is an optional Unix timestamp (seconds) at or after
+    /// which [`decrypt`](Self::decrypt) will refuse the token — pass `None` for
     /// a token that only expires when the key itself is retired.
+    /// `Some(0)` is rejected with [`EncipherError::InvalidExpiry`].
     ///
     /// `purpose` states what this token is for — pass `None` for the
     /// default, `"session"`. Two tokens minted under the same key for two
     /// different purposes (say, a session and a password-reset link) are
     /// never interchangeable, because the purpose string is bound into
     /// the token's authenticated data; nothing but this crate needs to
-    /// enforce that on your behalf.
+    /// enforce that on your behalf. An explicit purpose must contain
+    /// between 1 and 255 UTF-8 bytes.
     ///
     /// Token layout: `nonce.context.ciphertext`, each segment
     /// base64url-encoded. `context` carries the format version, purpose,
     /// and expiry — visible, but authenticated: changing it by even one
-    /// bit invalidates the whole token.
+    /// bit invalidates the whole token. Each nonce comes directly from
+    /// operating system randomness; the key and backend can be shared
+    /// across workers that need to read each other's tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncipherError::TooLarge`] for plaintext over 16 KiB,
+    /// [`EncipherError::InvalidExpiry`] for `Some(0)`,
+    /// [`EncipherError::EmptyPurpose`] or [`EncipherError::PurposeTooLong`]
+    /// for an invalid purpose, and [`EncipherError::RandomnessUnavailable`]
+    /// if operating system randomness fails.
     pub fn encrypt(&self, text: &str, expires_at: Option<u64>, purpose: Option<&str>) -> Result<String, EncipherError> {
         let mut output = String::new();
         self.encrypt_into(text, expires_at, purpose, &mut output)?;
@@ -190,7 +214,9 @@ impl Encipher {
 
     /// Same as [`encrypt`](Self::encrypt), but writes the token into a
     /// caller-supplied buffer instead of allocating a new `String` — lets
-    /// a caller reuse one buffer's capacity across many calls.
+    /// a caller reuse one buffer's capacity across many calls. Clears
+    /// `output` first, including when returning an error. The same errors
+    /// as [`encrypt`](Self::encrypt) apply.
     pub fn encrypt_into(&self, text: &str, expires_at: Option<u64>, purpose: Option<&str>, output: &mut String) -> Result<(), EncipherError> {
         let mut scratch = Vec::new();
         self.encrypt_into_with_scratch(text, expires_at, purpose, output, &mut scratch)
@@ -203,11 +229,11 @@ impl Encipher {
     /// caller — safe to call concurrently from multiple threads on one
     /// shared `Encipher`, each thread using its own local buffers.
     ///
-    /// Returns [`EncipherError::TooLarge`] — never panics — if `text`
-    /// exceeds the plaintext size limit; oversized input is exactly the
-    /// kind of thing a caller can receive from the outside world, so it
-    /// is reported like any other recoverable error, not treated as a
-    /// programmer bug.
+    /// Clears `output` first, including on error. On success, `scratch`
+    /// contains ciphertext and its authentication tag; on a returned
+    /// error, `scratch` is unchanged. Both buffers retain their allocations
+    /// when capacity is sufficient; token context still allocates.
+    /// The same errors as [`encrypt`](Self::encrypt) apply.
     pub fn encrypt_into_with_scratch(
         &self,
         text: &str,
@@ -222,41 +248,34 @@ impl Encipher {
             return Err(EncipherError::TooLarge);
         }
 
+        if expires_at == Some(0) {
+            return Err(EncipherError::InvalidExpiry);
+        }
+
         let purpose = purpose.unwrap_or(DEFAULT_PURPOSE);
         if purpose.is_empty() {
             return Err(EncipherError::EmptyPurpose);
+        }
+        if purpose.len() > MAX_FIELD_LEN {
+            return Err(EncipherError::PurposeTooLong);
         }
         let context = aad::Context::new(purpose.to_string());
         let context = match expires_at {
             Some(expires_at) => context.expiring_at(expires_at),
             None => context,
         };
-        let context_bytes = context.to_bytes().ok_or(EncipherError::TooLarge)?;
+        let context_bytes = context.to_bytes().ok_or(EncipherError::PurposeTooLong)?;
 
-        scratch.clear();
-        let nonce_str;
         match &self.state {
             BackendState::Aes256Gcm { cipher } => {
-                let (nonce, ciphertext) = aes_backend::encrypt(cipher, plaintext, &context_bytes);
-                *scratch = ciphertext;
-                nonce_str = Base64Url::encode_string(&nonce);
+                let nonce = aes_backend::encrypt(cipher, plaintext, &context_bytes, scratch)?;
+                encode_token(&nonce, &context_bytes, scratch, output);
             }
             BackendState::XChaCha20Poly1305 { cipher } => {
-                let (nonce, ciphertext) = xchacha_backend::encrypt(cipher, plaintext, &context_bytes);
-                *scratch = ciphertext;
-                nonce_str = Base64Url::encode_string(&nonce);
+                let nonce = xchacha_backend::encrypt(cipher, plaintext, &context_bytes, scratch)?;
+                encode_token(&nonce, &context_bytes, scratch, output);
             }
         }
-
-        let context_str = Base64Url::encode_string(&context_bytes);
-        let cipher_str = Base64Url::encode_string(scratch);
-
-        output.reserve(nonce_str.len() + context_str.len() + cipher_str.len() + 2);
-        output.push_str(&nonce_str);
-        output.push('.');
-        output.push_str(&context_str);
-        output.push('.');
-        output.push_str(&cipher_str);
 
         Ok(())
     }
@@ -356,6 +375,25 @@ impl Encipher {
         let context = aad::Context::from_bytes(&context_bytes).ok_or(EncipherError::InvalidToken)?;
         Ok(OpenedToken { plaintext, context })
     }
+}
+
+fn encode_token(nonce: &[u8], context: &[u8], ciphertext: &[u8], output: &mut String) {
+    let nonce_len = Base64Url::encoded_len(nonce);
+    let context_len = Base64Url::encoded_len(context);
+    let ciphertext_len = Base64Url::encoded_len(ciphertext);
+    let mut bytes = std::mem::take(output).into_bytes();
+    bytes.resize(nonce_len + context_len + ciphertext_len + 2, 0);
+
+    let (nonce_out, rest) = bytes.split_at_mut(nonce_len);
+    Base64Url::encode(nonce, nonce_out).expect("nonce buffer has the encoded length");
+    rest[0] = b'.';
+    let (context_out, rest) = rest[1..].split_at_mut(context_len);
+    Base64Url::encode(context, context_out).expect("context buffer has the encoded length");
+    rest[0] = b'.';
+    Base64Url::encode(ciphertext, &mut rest[1..])
+        .expect("ciphertext buffer has the encoded length");
+
+    *output = String::from_utf8(bytes).expect("base64url and separators are ASCII");
 }
 
 /// The proven-authentic contents of a token: its payload, still as raw
@@ -494,18 +532,127 @@ mod tests {
     }
 
     #[test]
-    fn scratch_buffer_reuse_matches_fresh_allocation() {
-        let cipher = Encipher::new(Some(42), None, Backend::Aes256Gcm).unwrap();
-        let mut output = String::new();
-        let mut scratch = Vec::new();
+    fn tokens_minted_by_v2_still_decrypt() {
+        // Generated by the unmodified 2.0.0 implementation with key 42.
+        let fixtures = [
+            (Backend::Aes256Gcm, "session", None,
+                "XjyI72OPxA0x9KFX.AQAAAAAAAAAAB3Nlc3Npb24=.JKJJxRYexnCx78tErn8T9cbc-o12AQucBtJjptkRBugk6A=="),
+            (Backend::Aes256Gcm, "password-reset", Some(1000),
+                "HlXlgh7EVls_f1BN.AQAAAAAAAAPoDnBhc3N3b3JkLXJlc2V0.3Xda6EYpBnv6XCSGLMwfIYMp26pnH_kFppnTIh4YIqaXEw=="),
+            (Backend::Aes256Gcm, "session", Some(0),
+                "Bgrkepc8Z6GiVrDR.AQAAAAAAAAAAB3Nlc3Npb24=.ryxIIpJFTfDhgQYoAya-jYJp2CEhsgY9f6MfzEKZhyGp8Q=="),
+            (Backend::Aes256Gcm, "password-reset", None,
+                "K_oLA4ygMzm6qBpg.AQAAAAAAAAAADnBhc3N3b3JkLXJlc2V0.CVUf-W96OzwpbrnC436P8XpPXgwVtKeybiFk6xDMMIqKkw=="),
+            (Backend::XChaCha20Poly1305, "session", None,
+                "olnXkyBHdC4TV52YeqIesc43d96mmmUs.AQAAAAAAAAAAB3Nlc3Npb24=.Hb1ZMS6nrBtofd9BKed42ReHVgdI9MC4VliXbEbzTw3YNg=="),
+            (Backend::XChaCha20Poly1305, "password-reset", Some(1000),
+                "4hwKITM6YldC643ahywsh1VaIozwKr0d.AQAAAAAAAAPoDnBhc3N3b3JkLXJlc2V0.ep5f6HLYfDhGfjK_iE-BjZalQXj2W4Cbqa-FOCDqgI570g=="),
+            (Backend::XChaCha20Poly1305, "session", Some(0),
+                "YxYMY4NCD7DLuPlxVWJWf7WQDwkbPgC2.AQAAAAAAAAAAB3Nlc3Npb24=.4IXuU52HGhdCyYsgozsH049B2uV06wrd8WMzc2mqtdP0Ug=="),
+            (Backend::XChaCha20Poly1305, "password-reset", None,
+                "MPyyLZ4Mu3Cv2T6dbU7YHtVFmC7VcKdp.AQAAAAAAAAAADnBhc3N3b3JkLXJlc2V0.4hJl4c6iKGQV9aSmQ6wYvDO3Hw5-CQ63Q7y_9mXTgK0qKQ=="),
+        ];
 
-        cipher.encrypt_into_with_scratch("first", None, None, &mut output, &mut scratch).unwrap();
-        assert_eq!(cipher.decrypt(&output).unwrap(), "first");
+        for (backend, purpose, expires_at, token) in fixtures {
+            let cipher = Encipher::new(Some(42), None, backend).unwrap();
+            assert_eq!(
+                cipher.decrypt_for_at(token, purpose, 999).unwrap(),
+                "payload-under-test"
+            );
+            assert!(matches!(
+                cipher.decrypt_for_at(token, "wrong-purpose", 999),
+                Err(EncipherError::WrongPurpose)
+            ));
+            match expires_at {
+                Some(1000) => assert!(matches!(
+                    cipher.decrypt_for_at(token, purpose, 1000),
+                    Err(EncipherError::Expired)
+                )),
+                None | Some(0) => assert_eq!(
+                    cipher.decrypt_for_at(token, purpose, u64::MAX).unwrap(),
+                    "payload-under-test"
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
 
-        cipher
-            .encrypt_into_with_scratch("second, a longer message", None, None, &mut output, &mut scratch)
-            .unwrap();
-        assert_eq!(cipher.decrypt(&output).unwrap(), "second, a longer message");
+    #[test]
+    fn token_encoding_matches_the_existing_format() {
+        let nonce = [0xA5; 24];
+        let context = [0x5A; 265];
+        let ciphertext = [0xC3; MAX_PLAINTEXT_BYTES + TAG_LEN];
+        let mut output = String::with_capacity(MAX_TOKEN_LEN);
+        let original_ptr = output.as_ptr();
+        let original_capacity = output.capacity();
+
+        for nonce_len in [12, 24] {
+            for context_len in [17, 18, 19, 265] {
+                for ciphertext_len in [16, 17, 18, 19, ciphertext.len(), 16] {
+                    let expected = format!(
+                        "{}.{}.{}",
+                        Base64Url::encode_string(&nonce[..nonce_len]),
+                        Base64Url::encode_string(&context[..context_len]),
+                        Base64Url::encode_string(&ciphertext[..ciphertext_len]),
+                    );
+                    encode_token(
+                        &nonce[..nonce_len],
+                        &context[..context_len],
+                        &ciphertext[..ciphertext_len],
+                        &mut output,
+                    );
+                    assert_eq!(output, expected);
+                    assert_eq!(output.as_ptr(), original_ptr);
+                    assert_eq!(output.capacity(), original_capacity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scratch_buffer_reuses_its_allocation() {
+        for backend in all_backends() {
+            let cipher = Encipher::new(Some(42), None, backend).unwrap();
+            let mut output = String::new();
+            let mut scratch = Vec::with_capacity(MAX_PLAINTEXT_BYTES + TAG_LEN);
+            let original_ptr = scratch.as_ptr();
+            let original_capacity = scratch.capacity();
+            let largest = "x".repeat(MAX_PLAINTEXT_BYTES);
+
+            for text in ["first", largest.as_str(), ""] {
+                cipher
+                    .encrypt_into_with_scratch(text, None, None, &mut output, &mut scratch)
+                    .unwrap();
+                assert_eq!(cipher.decrypt(&output).unwrap(), text);
+                assert_eq!(scratch.as_ptr(), original_ptr);
+                assert_eq!(scratch.capacity(), original_capacity);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_expiry_is_rejected() {
+        for backend in all_backends() {
+            let cipher = Encipher::new(Some(42), None, backend).unwrap();
+            assert!(matches!(
+                cipher.encrypt("hello", Some(0), None),
+                Err(EncipherError::InvalidExpiry)
+            ));
+        }
+    }
+
+    #[test]
+    fn purpose_limit_counts_utf8_bytes() {
+        for backend in all_backends() {
+            let cipher = Encipher::new(Some(42), None, backend).unwrap();
+            let at_limit = format!("{}a", "é".repeat(127));
+            let token = cipher.encrypt("x", None, Some(&at_limit)).unwrap();
+            assert_eq!(cipher.decrypt_for(&token, &at_limit).unwrap(), "x");
+            assert!(matches!(
+                cipher.encrypt("x", None, Some(&"é".repeat(128))),
+                Err(EncipherError::PurposeTooLong)
+            ));
+        }
     }
 
     #[test]

@@ -8,12 +8,12 @@
 //! deployment, `Backend::XChaCha20Poly1305`'s 192-bit nonce removes the
 //! question entirely.
 
-use aes_gcm::aead::{Aead, Payload};
+use aes_gcm::aead::{Aead, AeadInPlace, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use rand::RngExt;
+use rand::{rngs::SysRng, TryRng};
 use sha2::{Digest, Sha256};
 
-use crate::EncipherError;
+use crate::{EncipherError, TAG_LEN};
 
 /// Widens the crate's plain `u128` key into the 256-bit key GCM expects.
 /// Hashing here is purely a formatting step, not a strengthening one — the
@@ -30,18 +30,25 @@ pub fn build_cipher(key: &[u8; 32]) -> Aes256Gcm {
     Aes256Gcm::new_from_slice(key).expect("a 32-byte key always fits AES-256")
 }
 
-/// Encrypts `plaintext` under `aad`, returning `(nonce, ciphertext_and_tag)`.
-/// The tag is appended to the ciphertext by the underlying crate — nothing
-/// extra to carry alongside it.
-pub fn encrypt(cipher: &Aes256Gcm, plaintext: &[u8], aad: &[u8]) -> ([u8; 12], Vec<u8>) {
+/// Clears `output`, writes ciphertext and tag into it, and returns the nonce.
+pub fn encrypt(
+    cipher: &Aes256Gcm,
+    plaintext: &[u8],
+    aad: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<[u8; 12], EncipherError> {
     let mut nonce_bytes = [0u8; 12];
-    rand::rng().fill(&mut nonce_bytes);
+    SysRng.try_fill_bytes(&mut nonce_bytes)
+        .map_err(|_| EncipherError::RandomnessUnavailable)?;
 
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), Payload { msg: plaintext, aad })
-        .expect("encryption under a fresh nonce cannot fail");
+    output.clear();
+    output.reserve(plaintext.len() + TAG_LEN);
+    output.extend_from_slice(plaintext);
+    cipher
+        .encrypt_in_place(Nonce::from_slice(&nonce_bytes), aad, output)
+        .expect("bounded plaintext and AAD fit the cipher limits");
 
-    (nonce_bytes, ciphertext)
+    Ok(nonce_bytes)
 }
 
 /// Decrypts `ciphertext`, verifying it was produced under exactly this
@@ -63,7 +70,8 @@ mod tests {
     #[test]
     fn round_trips() {
         let cipher = build_cipher(&derive_key(42));
-        let (nonce, ct) = encrypt(&cipher, b"a session's worth of data", b"context");
+        let mut ct = Vec::new();
+        let nonce = encrypt(&cipher, b"a session's worth of data", b"context", &mut ct).unwrap();
         let pt = decrypt(&cipher, &nonce, &ct, b"context").unwrap();
         assert_eq!(pt, b"a session's worth of data");
     }
@@ -71,15 +79,18 @@ mod tests {
     #[test]
     fn rejects_tampered_aad() {
         let cipher = build_cipher(&derive_key(42));
-        let (nonce, ct) = encrypt(&cipher, b"data", b"context-a");
+        let mut ct = Vec::new();
+        let nonce = encrypt(&cipher, b"data", b"context-a", &mut ct).unwrap();
         assert!(decrypt(&cipher, &nonce, &ct, b"context-b").is_err());
     }
 
     #[test]
     fn same_plaintext_different_ciphertext_each_time() {
         let cipher = build_cipher(&derive_key(42));
-        let (_, ct1) = encrypt(&cipher, b"same message", b"");
-        let (_, ct2) = encrypt(&cipher, b"same message", b"");
+        let mut ct1 = Vec::new();
+        let mut ct2 = Vec::new();
+        encrypt(&cipher, b"same message", b"", &mut ct1).unwrap();
+        encrypt(&cipher, b"same message", b"", &mut ct2).unwrap();
         assert_ne!(ct1, ct2, "a fresh nonce must change the output even for identical input");
     }
 

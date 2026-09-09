@@ -3,6 +3,46 @@
 All notable changes to this crate are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.0] - Unreleased
+
+### Security
+
+- Generate nonces directly from operating system randomness in both
+  backends, preventing nonce reuse caused by copying initialized
+  `ThreadRng` state across `fork`. Randomness failures now return
+  `EncipherError::RandomnessUnavailable`.
+
+### Breaking changes
+
+- Encryption rejects `expires_at = Some(0)` with `InvalidExpiry`.
+  Use `None` for no expiry, or a positive Unix timestamp for an expiry.
+- `EncipherError` adds `InvalidExpiry`, `PurposeTooLong`, and
+  `RandomnessUnavailable`, and is now `#[non_exhaustive]`. Downstream
+  exhaustive `match` expressions must add a wildcard arm (`_`).
+- Purposes exceeding 255 UTF-8 bytes return `PurposeTooLong` instead
+  of the plaintext-size error `TooLarge`.
+
+### Performance
+
+- Encrypt in place in the caller's `scratch` buffer, retaining its
+  allocation when capacity is sufficient.
+- Encode token segments into the output buffer, avoiding three
+  temporary Base64 strings.
+
+### Maintenance
+
+- Refresh the main and fuzz lockfiles to `rand` 0.10.2 and `thiserror`
+  2.0.20 within the existing dependency requirements.
+- Update README and API documentation for migration, errors, expiry,
+  randomness, and buffer reuse.
+
+### Upgrading from 2.x
+
+The token format and key derivation are unchanged. Existing 2.x tokens
+remain readable with the same key and backend, including tokens minted
+with `Some(0)`: those remain non-expiring because their stored expiry
+is indistinguishable from `None`.
+
 ## [2.0.0]
 
 A complete, from-scratch rewrite. The previous design used a custom
@@ -32,8 +72,8 @@ public API, and error types are all new.
   authentication has already succeeded.
 - Explicit size limits on both plaintext and the token itself, checked
   before any decoding work is done on untrusted input.
-- `encrypt_into` / `encrypt_into_with_scratch`: allocation-free variants
-  for callers minting many tokens per second.
+- `encrypt_into` / `encrypt_into_with_scratch`: variants that reuse
+  caller-owned buffers for callers minting many tokens per second.
 - A `fuzz/` suite (via `cargo-fuzz`) covering both the token decryption
   path and the token-context parser directly.
 

@@ -13,17 +13,16 @@ formatting, token layout, purpose binding, and expiry all handled for
 you, so the only decision left to make is which backend fits your
 deployment target.
 
-> **Version 2.0 note**: this release is a complete, from-scratch rewrite
-> around standard AEAD ciphers (AES-256-GCM / XChaCha20-Poly1305) in
-> place of the earlier custom design. It's a clean break, not an
-> incremental update — see [CHANGELOG.md](CHANGELOG.md) for what changed
-> and why, and for what upgrading means for tokens minted by 0.x.
+> **Version 3.0 (unreleased)** fixes nonce generation across `fork` and
+> improves buffer reuse. Existing 2.x tokens remain compatible with the
+> same key and backend. See [Upgrading from 2.x](#upgrading-from-2x) and
+> [CHANGELOG.md](CHANGELOG.md) for the API changes and the earlier 0.x migration.
 
 ## Installation
 
 ```toml
 [dependencies]
-encipher = "2"
+encipher = "3"
 ```
 
 ## Usage
@@ -77,6 +76,44 @@ A token minted for one purpose is authenticated data — it can't be
 it under the wrong one either, so a password-reset token can never be
 mistaken for a session token even under the same key.
 
+Explicit purposes must contain 1–255 UTF-8 bytes. Empty purposes return
+`EmptyPurpose`; longer ones return `PurposeTooLong`.
+
+## Expiry
+
+`expires_at` is an absolute Unix timestamp in seconds. The token is
+expired when the current time is greater than or equal to that timestamp.
+Pass `None` for no expiry; `Some(0)` returns `InvalidExpiry`. Plaintext is
+limited to 16 KiB (`TooLarge` when exceeded).
+
+## Reusing buffers
+
+`encrypt_into` clears and rewrites the supplied `String`.
+`encrypt_into_with_scratch` additionally reuses a `Vec<u8>` for ciphertext
+and its authentication tag. Both retain their allocations when capacity
+is sufficient; the operation still allocates for token context.
+Each concurrent call needs its own buffers.
+
+Both methods clear `output` even on error. `scratch` is overwritten on
+success and remains unchanged on a returned error.
+
+Nonces are drawn from operating system randomness on every encryption.
+If it is unavailable, encryption returns `RandomnessUnavailable`.
+Workers can still read each other's tokens with the same key and backend.
+
+## Upgrading from 2.x
+
+- Replace `Some(0)` with `None` when minting non-expiring tokens.
+- `EncipherError` adds `InvalidExpiry`, `PurposeTooLong`, and
+  `RandomnessUnavailable`. It is now `#[non_exhaustive]`, so exhaustive
+  error matches need a wildcard arm (`_`).
+- Purposes longer than 255 UTF-8 bytes return `PurposeTooLong` instead of
+  `TooLarge`.
+
+The token format and key derivation are unchanged. Existing 2.x tokens
+remain readable, including old `Some(0)` tokens, which remain non-expiring.
+Tokens from 0.x remain incompatible.
+
 ## Using an environment variable
 
 ```rust
@@ -88,9 +125,9 @@ let cipher = Encipher::new(None, Some("ENCIPHER_KEY"), Backend::Aes256Gcm).unwra
 
 ## Revocation
 
-There is no `session_id` or similar in this crate on purpose. A token is
-already unique — its nonce guarantees that — so it's already a fine key
-to store in a revocation list of your own the moment a caller logs out.
+There is no `session_id` or similar in this crate. You can store the token
+string itself in a revocation list when a caller logs out. Random nonces
+make token collisions unlikely; they do not guarantee uniqueness.
 Where that list lives (a local cache, Redis, a database) is a deployment
 decision this crate deliberately has no opinion on.
 

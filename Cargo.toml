@@ -1,6 +1,6 @@
 [package]
 name        = "encipher"
-version     = "2.0.0"
+version     = "3.0.0"
 edition     = "2021"
 description = "A fast, allocation-conscious session-data cipher for Rust, built entirely on audited AEAD primitives (AES-256-GCM, XChaCha20-Poly1305)."
 license     = "Apache-2.0"

@@ -12,11 +12,9 @@
 //!   one minted for another, even under the same key.
 //!
 //! Deliberately absent: anything resembling a token identifier for
-//! revocation lookups. A token is already unique — its nonce sees to that
-//! — so it's already its own identifier. A caller who needs to blacklist
-//! one after logout can store the token string itself; this crate has no
-//! business minting a second identifier for a job the first one already
-//! does.
+//! revocation lookups. A caller who needs to blacklist a token after
+//! logout can store the token string itself. Random nonces make collisions
+//! unlikely, but do not guarantee uniqueness.
 //!
 //! Associated data is not secret — it travels in the clear, right next to
 //! the ciphertext — but any change to it, by even one bit, makes the whole
@@ -33,7 +31,7 @@ const FORMAT_VERSION: u8 = 1;
 /// can hold. A purpose is a short label, not a payload — this ceiling
 /// exists to catch a caller passing something else in by mistake, not to
 /// accommodate a legitimately long value.
-const MAX_FIELD_LEN: usize = u8::MAX as usize;
+pub(crate) const MAX_FIELD_LEN: usize = u8::MAX as usize;
 
 /// Everything bound to a single token besides its encrypted payload: why
 /// it exists, and when it stops being valid.
